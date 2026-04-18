@@ -20,6 +20,39 @@ def download_telegram_image(file_id):
     file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
     return requests.get(file_url).content
 
+def describe_character(image_bytes):
+    print("[GROQ] Analisis karakter dari foto...", flush=True)
+    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    data = {
+        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+                    },
+                    {
+                        "type": "text",
+                        "text": "Deskripsikan orang di foto ini secara sangat detail dalam bahasa Inggris untuk dipakai sebagai prompt image generation. Fokus pada: jenis kelamin, usia perkiraan, warna kulit, bentuk wajah, warna dan gaya rambut, fitur wajah khas, postur tubuh, pakaian (warna, jenis, detail). Tulis dalam 2-3 kalimat padat, format deskripsi langsung tanpa intro."
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 300
+    }
+    try:
+        response = requests.post(GROQ_URL, headers=headers, json=data)
+        result = response.json()
+        desc = result["choices"][0]["message"]["content"]
+        print(f"[GROQ] Deskripsi karakter: {desc}", flush=True)
+        return desc
+    except Exception as e:
+        print(f"[GROQ] Error describe: {e}", flush=True)
+        return "Indonesian man, medium build, black hair"
+
 def parse_user_prompt(user_text):
     prompt_groq = f"""
 Kamu adalah asisten kreatif. Ubah perintah user menjadi daftar adegan detail (2-4 adegan).
@@ -37,10 +70,15 @@ Input: {user_text}
         print(f"[GROQ] Error: {e}", flush=True)
         return 0, []
 
-def generate_frame(adegan_prompt, index):
+def generate_frame(character_desc, adegan_prompt, index):
     print(f"[HF] Generate adegan {index}...", flush=True)
 
-    full_prompt = f"cinematic photorealistic, natural lighting, Indonesian man cooking rendang beef, {adegan_prompt}, high quality, 4k"
+    full_prompt = (
+        f"{character_desc}, "
+        f"{adegan_prompt}, "
+        f"cinematic photorealistic, natural lighting, high quality, 4k, "
+        f"same person same face same clothes throughout"
+    )
 
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     data = {"inputs": full_prompt}
@@ -49,13 +87,12 @@ def generate_frame(adegan_prompt, index):
         try:
             response = requests.post(HF_URL, headers=headers, json=data, timeout=60)
             print(f"[HF] Status: {response.status_code}", flush=True)
-
             if response.status_code == 200:
                 print(f"[HF] Adegan {index} berhasil!", flush=True)
                 return response.content
             elif response.status_code == 503:
                 wait = response.json().get("estimated_time", 20)
-                print(f"[HF] Model loading, tunggu {wait}s...", flush=True)
+                print(f"[HF] Loading, tunggu {wait}s...", flush=True)
                 time.sleep(wait)
             else:
                 print(f"[HF] Error: {response.text[:300]}", flush=True)
@@ -63,7 +100,6 @@ def generate_frame(adegan_prompt, index):
         except Exception as e:
             print(f"[HF] Exception: {e}", flush=True)
             time.sleep(5)
-
     return None
 
 def send_image_to_telegram(chat_id, image_bytes, caption=""):
@@ -91,6 +127,15 @@ def process_telegram_update(update):
     caption = message["caption"]
 
     print(f"[BOT] Pesan dari {chat_id}: {caption}", flush=True)
+    send_message_to_telegram(chat_id, "Menganalisis karakter...")
+    
+    image_bytes = download_telegram_image(file_id)
+    if not image_bytes:
+        send_message_to_telegram(chat_id, "Gagal download gambar.")
+        return
+
+    character_desc = describe_character(image_bytes)
+
     send_message_to_telegram(chat_id, "Memahami permintaan...")
     jumlah, adegan_list = parse_user_prompt(caption)
 
@@ -101,7 +146,7 @@ def process_telegram_update(update):
     send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
 
     for i, adegan in enumerate(adegan_list, 1):
-        frame_bytes = generate_frame(adegan, i)
+        frame_bytes = generate_frame(character_desc, adegan, i)
         if frame_bytes:
             send_image_to_telegram(chat_id, frame_bytes, f"Adegan {i}/{jumlah}")
         else:
