@@ -4,12 +4,16 @@ import os
 import json
 import base64
 from io import BytesIO
+import replicate
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+REPLICATE_API_TOKEN = os.environ.get("REPLICATE_API_TOKEN")
+
+# Setup Replicate client
+replicate_client = replicate.Client(api_token=REPLICATE_API_TOKEN)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-POLLINATIONS_URL = "https://image.pollinations.ai/prompt"
 
 def download_telegram_image(file_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
@@ -22,15 +26,15 @@ def download_telegram_image(file_id):
 
 def parse_user_prompt(user_text):
     prompt_groq = f"""
-Kamu adalah asisten kreatif. Ubah perintah user menjadi daftar adegan detail (2-4 adegan).
+Kamu adalah asisten kreatif. Ubah perintah user menjadi daftar adegan detail (2-6 adegan).
 
 Format output HARUS JSON:
 {{
   "jumlah": 3,
-  "adegan": ["deskripsi detail 1", "deskripsi detail 2", "deskripsi detail 3"]
+  "adegan": ["deskripsi detail adegan 1", "deskripsi detail adegan 2", "deskripsi detail adegan 3"]
 }}
 
-Input: {user_text}
+Input user: {user_text}
 """
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     data = {
@@ -46,23 +50,41 @@ Input: {user_text}
         content = result["choices"][0]["message"]["content"]
         hasil = json.loads(content)
         return hasil.get("jumlah", 0), hasil.get("adegan", [])
-    except:
+    except Exception as e:
+        print(f"[GROQ] Error: {e}")
         return 0, []
 
 def generate_frame(reference_image_bytes, adegan_prompt, index):
-    print(f"[POLLINATIONS] Generate adegan {index}...")
+    print(f"[REPLICATE] Generate adegan {index}...")
     
-    # Pollinations gak support reference image langsung, jadi kita kirim prompt aja
-    full_prompt = f"{adegan_prompt}, cinematic, photorealistic, 8K, natural lighting"
-    encoded_prompt = requests.utils.quote(full_prompt)
-    
+    # Upload reference image ke Replicate
     try:
-        response = requests.get(f"{POLLINATIONS_URL}/{encoded_prompt}")
-        if response.status_code == 200:
-            return response.content
-        else:
-            return None
-    except:
+        # Convert bytes ke base64 URI
+        image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
+        image_data_uri = f"data:image/jpeg;base64,{image_base64}"
+        
+        # Pake model Flux.1 Image-to-Image
+        output = replicate_client.run(
+            "black-forest-labs/flux-1.1-pro:main",
+            input={
+                "prompt": f"{adegan_prompt}, cinematic, photorealistic, 8K, natural lighting",
+                "image": image_data_uri,
+                "image_strength": 0.75,  # 0.75 = jaga 75% mirip referensi
+                "num_outputs": 1,
+                "aspect_ratio": "9:16",
+                "output_format": "jpg"
+            }
+        )
+        
+        if output and len(output) > 0:
+            # Download gambar hasil
+            img_response = requests.get(output[0])
+            if img_response.status_code == 200:
+                return img_response.content
+        return None
+        
+    except Exception as e:
+        print(f"[REPLICATE] Error: {e}")
         return None
 
 def send_image_to_telegram(chat_id, image_bytes, caption=""):
@@ -82,32 +104,44 @@ def process_telegram_update(update):
     message = update["message"]
     chat_id = message["chat"]["id"]
     
-    if "caption" not in message:
-        send_message_to_telegram(chat_id, "Kirim foto + caption prompt.")
+    if "photo" not in message:
+        send_message_to_telegram(chat_id, "Silakan kirim FOTO karakter + prompt bebas.")
         return
     
+    if "caption" not in message:
+        send_message_to_telegram(chat_id, "Tulis prompt di caption foto.")
+        return
+    
+    photo = message["photo"][-1]
+    file_id = photo["file_id"]
     caption = message["caption"]
     
     send_message_to_telegram(chat_id, "Memahami permintaan...")
     jumlah, adegan_list = parse_user_prompt(caption)
     
     if jumlah == 0 or not adegan_list:
-        send_message_to_telegram(chat_id, "Gagal memahami prompt.")
+        send_message_to_telegram(chat_id, "Gagal memahami prompt. Coba tulis ulang.")
         return
     
     send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
     
+    reference_image = download_telegram_image(file_id)
+    if not reference_image:
+        send_message_to_telegram(chat_id, "Gagal download gambar.")
+        return
+    
     for i, adegan in enumerate(adegan_list, 1):
-        frame_bytes = generate_frame(None, adegan, i)
+        frame_bytes = generate_frame(reference_image, adegan, i)
         if frame_bytes:
             send_image_to_telegram(chat_id, frame_bytes, f"Adegan {i}/{jumlah}")
         else:
             send_message_to_telegram(chat_id, f"Gagal generate adegan {i}.")
+        time.sleep(2)  # Jeda biar gak kena rate limit
     
     send_message_to_telegram(chat_id, f"Selesai. {jumlah} adegan dibuat.")
 
 def main():
-    print("[BOT] Bot Pollinations + Groq berjalan...")
+    print("[BOT] Bot Replicate + Groq berjalan...")
     last_update_id = 0
     while True:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
