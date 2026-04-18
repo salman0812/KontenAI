@@ -9,7 +9,7 @@ HF_API_KEY = os.environ.get("HF_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-HF_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+HF_URL = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
 
 def download_telegram_image(file_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
