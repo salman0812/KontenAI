@@ -2,64 +2,42 @@ import requests
 import time
 import os
 import json
-import base64
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 HF_API_KEY = os.environ.get("HF_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-HF_URL = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-refiner-1.0"
+HF_URL = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-dev"
 
-def download_telegram_image(file_id):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
-    response = requests.post(url, data={"file_id": file_id})
-    if response.status_code != 200:
-        return None
-    file_path = response.json()["result"]["file_path"]
-    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-    return requests.get(file_url).content
+QUALITY_SUFFIX = (
+    "ultra photorealistic, hyperrealistic, natural lighting, sharp focus, "
+    "8k uhd, high resolution, masterpiece, perfect anatomy, cinematic, "
+    "professional photography, raw photo, detailed skin texture, "
+    "realistic shadows, depth of field"
+)
 
-def describe_character(image_bytes):
-    print("[GROQ] Analisis karakter...", flush=True)
-    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    data = {
-        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "messages": [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
-                },
-                {
-                    "type": "text",
-                    "text": "Describe this person in English for image generation. Include: gender, age, skin tone, face shape, hair color and style, distinctive facial features, body type, clothing. 2-3 sentences, start directly with description."
-                }
-            ]
-        }],
-        "max_tokens": 300
-    }
-    try:
-        response = requests.post(GROQ_URL, headers=headers, json=data)
-        desc = response.json()["choices"][0]["message"]["content"]
-        print(f"[GROQ] Karakter: {desc}", flush=True)
-        return desc
-    except Exception as e:
-        print(f"[GROQ] Error: {e}", flush=True)
-        return "Indonesian young man, medium build, black hair"
+NEGATIVE = (
+    "cartoon, anime, painting, illustration, blurry, low quality, "
+    "deformed, ugly, unrealistic, fake, CGI, plastic skin"
+)
 
 def parse_user_prompt(user_text):
     prompt_groq = f"""
-Kamu adalah asisten kreatif. Ubah perintah user menjadi daftar adegan detail (2-4 adegan).
+Kamu adalah asisten kreatif konten visual. Ubah perintah user menjadi daftar adegan sinematik detail (2-4 adegan).
 Format output HARUS JSON:
-{{"jumlah": 3, "adegan": ["deskripsi adegan 1", "deskripsi adegan 2", "deskripsi adegan 3"]}}
-Fokus HANYA pada aksi/aktivitas dan latar belakang. Jangan deskripsikan orangnya.
+{{"jumlah": 3, "adegan": ["deskripsi 1", "deskripsi 2", "deskripsi 3"]}}
+Tulis setiap adegan dalam bahasa Inggris, sangat deskriptif: subjek, aksi, latar, pencahayaan, suasana.
+Jangan deskripsikan kualitas gambar, itu sudah dihandle otomatis.
 Input: {user_text}
 """
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    data = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt_groq}], "temperature": 0.7, "response_format": {"type": "json_object"}}
+    data = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt_groq}],
+        "temperature": 0.7,
+        "response_format": {"type": "json_object"}
+    }
     try:
         response = requests.post(GROQ_URL, headers=headers, json=data)
         hasil = json.loads(response.json()["choices"][0]["message"]["content"])
@@ -68,24 +46,20 @@ Input: {user_text}
         print(f"[GROQ] Error: {e}", flush=True)
         return 0, []
 
-def generate_frame(image_bytes, character_desc, adegan_prompt, index):
+def generate_frame(adegan_prompt, index):
     print(f"[HF] Generate adegan {index}...", flush=True)
 
-    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-
-    full_prompt = (
-        f"{character_desc}, "
-        f"{adegan_prompt}, "
-        f"cinematic photorealistic, natural lighting, high quality 4k"
-    )
+    full_prompt = f"{adegan_prompt}, {QUALITY_SUFFIX}"
 
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     data = {
-        "inputs": image_base64,
+        "inputs": full_prompt,
         "parameters": {
-            "prompt": full_prompt,
-            "strength": 0.4,
-            "num_inference_steps": 30
+            "negative_prompt": NEGATIVE,
+            "num_inference_steps": 50,
+            "guidance_scale": 7.5,
+            "width": 1024,
+            "height": 1024
         }
     }
 
@@ -98,7 +72,7 @@ def generate_frame(image_bytes, character_desc, adegan_prompt, index):
                 return response.content
             elif response.status_code == 503:
                 wait = response.json().get("estimated_time", 20)
-                print(f"[HF] Loading, tunggu {wait}s...", flush=True)
+                print(f"[HF] Model loading, tunggu {wait}s...", flush=True)
                 time.sleep(wait)
             else:
                 print(f"[HF] Error: {response.text[:300]}", flush=True)
@@ -124,41 +98,30 @@ def process_telegram_update(update):
     message = update["message"]
     chat_id = message["chat"]["id"]
 
-    if "photo" not in message or "caption" not in message:
-        send_message_to_telegram(chat_id, "Kirim FOTO + caption prompt.")
+    text = message.get("caption") or message.get("text")
+    if not text:
+        send_message_to_telegram(chat_id, "Kirim prompt teks atau foto + caption.")
         return
 
-    photo = message["photo"][-1]
-    file_id = photo["file_id"]
-    caption = message["caption"]
+    print(f"[BOT] Pesan dari {chat_id}: {text}", flush=True)
 
-    print(f"[BOT] Pesan dari {chat_id}: {caption}", flush=True)
-
-    image_bytes = download_telegram_image(file_id)
-    if not image_bytes:
-        send_message_to_telegram(chat_id, "Gagal download gambar.")
-        return
-
-    send_message_to_telegram(chat_id, "Menganalisis karakter...")
-    character_desc = describe_character(image_bytes)
-
-    send_message_to_telegram(chat_id, "Memahami permintaan...")
-    jumlah, adegan_list = parse_user_prompt(caption)
+    send_message_to_telegram(chat_id, "⏳ Memahami permintaan...")
+    jumlah, adegan_list = parse_user_prompt(text)
 
     if jumlah == 0 or not adegan_list:
         send_message_to_telegram(chat_id, "Gagal memahami prompt.")
         return
 
-    send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
+    send_message_to_telegram(chat_id, f"🎬 Generating {jumlah} frame HD...")
 
     for i, adegan in enumerate(adegan_list, 1):
-        frame_bytes = generate_frame(image_bytes, character_desc, adegan, i)
+        frame_bytes = generate_frame(adegan, i)
         if frame_bytes:
-            send_image_to_telegram(chat_id, frame_bytes, f"Adegan {i}/{jumlah}")
+            send_image_to_telegram(chat_id, frame_bytes, f"Frame {i}/{jumlah}")
         else:
-            send_message_to_telegram(chat_id, f"Gagal generate adegan {i}.")
+            send_message_to_telegram(chat_id, f"Gagal generate frame {i}.")
 
-    send_message_to_telegram(chat_id, f"Selesai. {jumlah} adegan dibuat.")
+    send_message_to_telegram(chat_id, f"✅ Selesai. {jumlah} frame dibuat.")
 
 def main():
     print("[BOT] Berjalan...", flush=True)
