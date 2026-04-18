@@ -3,13 +3,12 @@ import time
 import os
 import json
 import base64
-from io import BytesIO
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
+GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key={GEMINI_API_KEY}"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 def download_telegram_image(file_id):
@@ -39,7 +38,8 @@ Input: {user_text}
         content = result["choices"][0]["message"]["content"]
         hasil = json.loads(content)
         return hasil.get("jumlah", 0), hasil.get("adegan", [])
-    except:
+    except Exception as e:
+        print(f"[GROQ] Error parse prompt: {e}")
         return 0, []
 
 def generate_frame(reference_image_bytes, adegan_prompt, index):
@@ -55,14 +55,30 @@ Adegan: {adegan_prompt}
 Gaya: Sinematik, fotorealistik, pencahayaan alami.
 """
     headers = {"Content-Type": "application/json"}
-    data = {"contents": [{"parts": [{"text": full_prompt}, {"inlineData": {"mimeType": "image/jpeg", "data": image_base64}}]}]}
+    data = {
+        "contents": [{"parts": [
+            {"text": full_prompt},
+            {"inlineData": {"mimeType": "image/jpeg", "data": image_base64}}
+        ]}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"]
+        }
+    }
     
     try:
         response = requests.post(GEMINI_IMAGE_URL, headers=headers, json=data)
         result = response.json()
-        image_data = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-        return base64.b64decode(image_data)
-    except:
+        print(f"[GEMINI] Response adegan {index}: {json.dumps(result, indent=2)[:500]}")
+        
+        for part in result["candidates"][0]["content"]["parts"]:
+            if "inlineData" in part:
+                return base64.b64decode(part["inlineData"]["data"])
+        
+        print(f"[GEMINI] Tidak ada image di response adegan {index}")
+        return None
+    except Exception as e:
+        print(f"[GEMINI] Error adegan {index}: {e}")
+        print(f"[GEMINI] Raw response: {response.text[:300] if 'response' in locals() else 'no response'}")
         return None
 
 def send_image_to_telegram(chat_id, image_bytes, caption=""):
