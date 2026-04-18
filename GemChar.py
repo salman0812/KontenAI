@@ -8,7 +8,7 @@ HF_API_KEY = os.environ.get("HF_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-HF_URL = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-dev"
+HF_URL = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
 
 QUALITY_SUFFIX = (
     "ultra photorealistic, hyperrealistic, natural lighting, sharp focus, "
