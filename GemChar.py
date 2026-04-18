@@ -4,15 +4,12 @@ import os
 import json
 import base64
 from io import BytesIO
-import replicate
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-REPLICATE_API_TOKEN = os.environ.get("REPLICATE_API_TOKEN")
 
-# Setup Replicate client
-replicate_client = replicate.Client(api_token=REPLICATE_API_TOKEN)
-
+GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 def download_telegram_image(file_id):
@@ -26,23 +23,15 @@ def download_telegram_image(file_id):
 
 def parse_user_prompt(user_text):
     prompt_groq = f"""
-Kamu adalah asisten kreatif. Ubah perintah user menjadi daftar adegan detail (2-6 adegan).
+Kamu adalah asisten kreatif. Ubah perintah user menjadi daftar adegan detail (2-4 adegan).
 
 Format output HARUS JSON:
-{{
-  "jumlah": 3,
-  "adegan": ["deskripsi detail adegan 1", "deskripsi detail adegan 2", "deskripsi detail adegan 3"]
-}}
+{{"jumlah": 3, "adegan": ["deskripsi 1", "deskripsi 2", "deskripsi 3"]}}
 
-Input user: {user_text}
+Input: {user_text}
 """
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    data = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt_groq}],
-        "temperature": 0.7,
-        "response_format": {"type": "json_object"}
-    }
+    data = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt_groq}], "temperature": 0.7, "response_format": {"type": "json_object"}}
     
     try:
         response = requests.post(GROQ_URL, headers=headers, json=data)
@@ -50,41 +39,30 @@ Input user: {user_text}
         content = result["choices"][0]["message"]["content"]
         hasil = json.loads(content)
         return hasil.get("jumlah", 0), hasil.get("adegan", [])
-    except Exception as e:
-        print(f"[GROQ] Error: {e}")
+    except:
         return 0, []
 
 def generate_frame(reference_image_bytes, adegan_prompt, index):
-    print(f"[REPLICATE] Generate adegan {index}...")
+    print(f"[GEMINI] Generate adegan {index}...")
+    image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
     
-    # Upload reference image ke Replicate
+    full_prompt = f"""
+[REFERENCE IMAGE PROVIDED]
+WAJAH, WARNA KULIT, BENTUK TUBUH, DAN PAKAIAN HARUS TETAP SAMA PERSIS.
+HANYA LATAR BELAKANG, POSE, DAN EKSPRESI YANG BOLEH BERUBAH.
+
+Adegan: {adegan_prompt}
+Gaya: Sinematik, fotorealistik, pencahayaan alami.
+"""
+    headers = {"Content-Type": "application/json"}
+    data = {"contents": [{"parts": [{"text": full_prompt}, {"inlineData": {"mimeType": "image/jpeg", "data": image_base64}}]}]}
+    
     try:
-        # Convert bytes ke base64 URI
-        image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
-        image_data_uri = f"data:image/jpeg;base64,{image_base64}"
-        
-        # Pake model Flux.1 Image-to-Image
-        output = replicate_client.run(
-            "black-forest-labs/flux-1.1-pro:main",
-            input={
-                "prompt": f"{adegan_prompt}, cinematic, photorealistic, 8K, natural lighting",
-                "image": image_data_uri,
-                "image_strength": 0.75,  # 0.75 = jaga 75% mirip referensi
-                "num_outputs": 1,
-                "aspect_ratio": "9:16",
-                "output_format": "jpg"
-            }
-        )
-        
-        if output and len(output) > 0:
-            # Download gambar hasil
-            img_response = requests.get(output[0])
-            if img_response.status_code == 200:
-                return img_response.content
-        return None
-        
-    except Exception as e:
-        print(f"[REPLICATE] Error: {e}")
+        response = requests.post(GEMINI_IMAGE_URL, headers=headers, json=data)
+        result = response.json()
+        image_data = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        return base64.b64decode(image_data)
+    except:
         return None
 
 def send_image_to_telegram(chat_id, image_bytes, caption=""):
@@ -95,8 +73,7 @@ def send_image_to_telegram(chat_id, image_bytes, caption=""):
 
 def send_message_to_telegram(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {"chat_id": chat_id, "text": text}
-    requests.post(url, data=data)
+    requests.post(url, data={"chat_id": chat_id, "text": text})
 
 def process_telegram_update(update):
     if "message" not in update:
@@ -104,12 +81,8 @@ def process_telegram_update(update):
     message = update["message"]
     chat_id = message["chat"]["id"]
     
-    if "photo" not in message:
-        send_message_to_telegram(chat_id, "Silakan kirim FOTO karakter + prompt bebas.")
-        return
-    
-    if "caption" not in message:
-        send_message_to_telegram(chat_id, "Tulis prompt di caption foto.")
+    if "photo" not in message or "caption" not in message:
+        send_message_to_telegram(chat_id, "Kirim FOTO + caption prompt.")
         return
     
     photo = message["photo"][-1]
@@ -120,11 +93,10 @@ def process_telegram_update(update):
     jumlah, adegan_list = parse_user_prompt(caption)
     
     if jumlah == 0 or not adegan_list:
-        send_message_to_telegram(chat_id, "Gagal memahami prompt. Coba tulis ulang.")
+        send_message_to_telegram(chat_id, "Gagal memahami prompt.")
         return
     
     send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
-    
     reference_image = download_telegram_image(file_id)
     if not reference_image:
         send_message_to_telegram(chat_id, "Gagal download gambar.")
@@ -136,12 +108,11 @@ def process_telegram_update(update):
             send_image_to_telegram(chat_id, frame_bytes, f"Adegan {i}/{jumlah}")
         else:
             send_message_to_telegram(chat_id, f"Gagal generate adegan {i}.")
-        time.sleep(2)  # Jeda biar gak kena rate limit
     
     send_message_to_telegram(chat_id, f"Selesai. {jumlah} adegan dibuat.")
 
 def main():
-    print("[BOT] Bot Replicate + Groq berjalan...")
+    print("[BOT] Bot Gemini + Groq berjalan...")
     last_update_id = 0
     while True:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
