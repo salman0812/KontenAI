@@ -5,11 +5,11 @@ import json
 import base64
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+HF_API_KEY = os.environ.get("HF_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+HF_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
 
 def download_telegram_image(file_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
@@ -37,47 +37,34 @@ Input: {user_text}
         print(f"[GROQ] Error: {e}", flush=True)
         return 0, []
 
-def generate_frame(reference_image_bytes, adegan_prompt, index):
-    print(f"[GEMINI] Generate adegan {index}...", flush=True)
-    image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
+def generate_frame(adegan_prompt, index):
+    print(f"[HF] Generate adegan {index}...", flush=True)
 
-    full_prompt = f"""Kamu adalah generator gambar. Buat gambar baru berdasarkan foto referensi berikut.
-WAJAH, WARNA KULIT, BENTUK TUBUH, DAN PAKAIAN HARUS TETAP SAMA PERSIS seperti di foto referensi.
-HANYA LATAR BELAKANG, POSE, DAN EKSPRESI yang boleh berubah sesuai adegan.
-Adegan: {adegan_prompt}
-Gaya: Sinematik, fotorealistik, pencahayaan alami."""
+    full_prompt = f"cinematic photorealistic, natural lighting, Indonesian man cooking rendang beef, {adegan_prompt}, high quality, 4k"
 
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "contents": [{"parts": [
-            {"text": full_prompt},
-            {"inlineData": {"mimeType": "image/jpeg", "data": image_base64}}
-        ]}],
-        "generationConfig": {
-            "responseModalities": ["IMAGE", "TEXT"]
-        }
-    }
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    data = {"inputs": full_prompt}
 
-    try:
-        response = requests.post(GEMINI_IMAGE_URL, headers=headers, json=data)
-        result = response.json()
-        print(f"[GEMINI] Status: {response.status_code}", flush=True)
-        print(f"[GEMINI] Response: {json.dumps(result)[:600]}", flush=True)
-
-        for part in result["candidates"][0]["content"]["parts"]:
-            if "inlineData" in part:
-                print(f"[GEMINI] Gambar adegan {index} berhasil!", flush=True)
-                return base64.b64decode(part["inlineData"]["data"])
-
-        print(f"[GEMINI] Tidak ada image di response", flush=True)
-        return None
-    except Exception as e:
-        print(f"[GEMINI] Error adegan {index}: {e}", flush=True)
+    for attempt in range(3):
         try:
-            print(f"[GEMINI] Raw: {response.text[:500]}", flush=True)
-        except:
-            pass
-        return None
+            response = requests.post(HF_URL, headers=headers, json=data, timeout=60)
+            print(f"[HF] Status: {response.status_code}", flush=True)
+
+            if response.status_code == 200:
+                print(f"[HF] Adegan {index} berhasil!", flush=True)
+                return response.content
+            elif response.status_code == 503:
+                wait = response.json().get("estimated_time", 20)
+                print(f"[HF] Model loading, tunggu {wait}s...", flush=True)
+                time.sleep(wait)
+            else:
+                print(f"[HF] Error: {response.text[:300]}", flush=True)
+                return None
+        except Exception as e:
+            print(f"[HF] Exception: {e}", flush=True)
+            time.sleep(5)
+
+    return None
 
 def send_image_to_telegram(chat_id, image_bytes, caption=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
@@ -112,13 +99,9 @@ def process_telegram_update(update):
         return
 
     send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
-    reference_image = download_telegram_image(file_id)
-    if not reference_image:
-        send_message_to_telegram(chat_id, "Gagal download gambar.")
-        return
 
     for i, adegan in enumerate(adegan_list, 1):
-        frame_bytes = generate_frame(reference_image, adegan, i)
+        frame_bytes = generate_frame(adegan, i)
         if frame_bytes:
             send_image_to_telegram(chat_id, frame_bytes, f"Adegan {i}/{jumlah}")
         else:
