@@ -9,7 +9,7 @@ HF_API_KEY = os.environ.get("HF_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-HF_URL = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
+HF_URL = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-refiner-1.0"
 
 def download_telegram_image(file_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
@@ -21,43 +21,41 @@ def download_telegram_image(file_id):
     return requests.get(file_url).content
 
 def describe_character(image_bytes):
-    print("[GROQ] Analisis karakter dari foto...", flush=True)
+    print("[GROQ] Analisis karakter...", flush=True)
     image_base64 = base64.b64encode(image_bytes).decode('utf-8')
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     data = {
         "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
-                    },
-                    {
-                        "type": "text",
-                        "text": "Deskripsikan orang di foto ini secara sangat detail dalam bahasa Inggris untuk dipakai sebagai prompt image generation. Fokus pada: jenis kelamin, usia perkiraan, warna kulit, bentuk wajah, warna dan gaya rambut, fitur wajah khas, postur tubuh, pakaian (warna, jenis, detail). Tulis dalam 2-3 kalimat padat, format deskripsi langsung tanpa intro."
-                    }
-                ]
-            }
-        ],
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+                },
+                {
+                    "type": "text",
+                    "text": "Describe this person in English for image generation. Include: gender, age, skin tone, face shape, hair color and style, distinctive facial features, body type, clothing. 2-3 sentences, start directly with description."
+                }
+            ]
+        }],
         "max_tokens": 300
     }
     try:
         response = requests.post(GROQ_URL, headers=headers, json=data)
-        result = response.json()
-        desc = result["choices"][0]["message"]["content"]
-        print(f"[GROQ] Deskripsi karakter: {desc}", flush=True)
+        desc = response.json()["choices"][0]["message"]["content"]
+        print(f"[GROQ] Karakter: {desc}", flush=True)
         return desc
     except Exception as e:
-        print(f"[GROQ] Error describe: {e}", flush=True)
-        return "Indonesian man, medium build, black hair"
+        print(f"[GROQ] Error: {e}", flush=True)
+        return "Indonesian young man, medium build, black hair"
 
 def parse_user_prompt(user_text):
     prompt_groq = f"""
 Kamu adalah asisten kreatif. Ubah perintah user menjadi daftar adegan detail (2-4 adegan).
 Format output HARUS JSON:
-{{"jumlah": 3, "adegan": ["deskripsi 1", "deskripsi 2", "deskripsi 3"]}}
+{{"jumlah": 3, "adegan": ["deskripsi adegan 1", "deskripsi adegan 2", "deskripsi adegan 3"]}}
+Fokus HANYA pada aksi/aktivitas dan latar belakang. Jangan deskripsikan orangnya.
 Input: {user_text}
 """
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -70,22 +68,30 @@ Input: {user_text}
         print(f"[GROQ] Error: {e}", flush=True)
         return 0, []
 
-def generate_frame(character_desc, adegan_prompt, index):
+def generate_frame(image_bytes, character_desc, adegan_prompt, index):
     print(f"[HF] Generate adegan {index}...", flush=True)
+
+    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
 
     full_prompt = (
         f"{character_desc}, "
         f"{adegan_prompt}, "
-        f"cinematic photorealistic, natural lighting, high quality, 4k, "
-        f"same person same face same clothes throughout"
+        f"cinematic photorealistic, natural lighting, high quality 4k"
     )
 
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-    data = {"inputs": full_prompt}
+    data = {
+        "inputs": image_base64,
+        "parameters": {
+            "prompt": full_prompt,
+            "strength": 0.4,
+            "num_inference_steps": 30
+        }
+    }
 
     for attempt in range(3):
         try:
-            response = requests.post(HF_URL, headers=headers, json=data, timeout=60)
+            response = requests.post(HF_URL, headers=headers, json=data, timeout=120)
             print(f"[HF] Status: {response.status_code}", flush=True)
             if response.status_code == 200:
                 print(f"[HF] Adegan {index} berhasil!", flush=True)
@@ -127,13 +133,13 @@ def process_telegram_update(update):
     caption = message["caption"]
 
     print(f"[BOT] Pesan dari {chat_id}: {caption}", flush=True)
-    send_message_to_telegram(chat_id, "Menganalisis karakter...")
-    
+
     image_bytes = download_telegram_image(file_id)
     if not image_bytes:
         send_message_to_telegram(chat_id, "Gagal download gambar.")
         return
 
+    send_message_to_telegram(chat_id, "Menganalisis karakter...")
     character_desc = describe_character(image_bytes)
 
     send_message_to_telegram(chat_id, "Memahami permintaan...")
@@ -146,7 +152,7 @@ def process_telegram_update(update):
     send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
 
     for i, adegan in enumerate(adegan_list, 1):
-        frame_bytes = generate_frame(character_desc, adegan, i)
+        frame_bytes = generate_frame(image_bytes, character_desc, adegan, i)
         if frame_bytes:
             send_image_to_telegram(chat_id, frame_bytes, f"Adegan {i}/{jumlah}")
         else:
