@@ -7,12 +7,10 @@ from io import BytesIO
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# Endpoint Gemini untuk generate gambar
 GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
-
-# Endpoint Gemini Text buat parse prompt
-GEMINI_TEXT_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 def download_telegram_image(file_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
@@ -24,40 +22,47 @@ def download_telegram_image(file_id):
     return requests.get(file_url).content
 
 def parse_user_prompt(user_text):
-    prompt_parser = f"""
-Kamu adalah asisten sutradara AI. User akan memberikan perintah bebas tentang adegan yang diinginkan.
+    prompt_groq = f"""
+Kamu adalah asisten kreatif. User memberikan perintah bebas tentang adegan yang diinginkan.
 
-Tugasmu:
-1. Tentukan berapa jumlah adegan yang diminta user (angka).
-2. Buat deskripsi detail untuk SETIAP adegan.
+Tugasmu: Ubah perintah user menjadi daftar adegan detail. Tentukan sendiri jumlah adegan yang pas (antara 2-6 adegan).
 
-Format output HARUS JSON:
+Format output HARUS JSON valid:
 {{
-  "jumlah": 4,
-  "adegan": ["deskripsi adegan 1", "deskripsi adegan 2", ...]
+  "jumlah": 3,
+  "adegan": [
+    "deskripsi detail adegan 1",
+    "deskripsi detail adegan 2",
+    "deskripsi detail adegan 3"
+  ]
 }}
 
 Input user: {user_text}
 """
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
     data = {
-        "contents": [{"parts": [{"text": prompt_parser}]}]
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt_groq}],
+        "temperature": 0.7,
+        "response_format": {"type": "json_object"}
     }
     
     try:
-        response = requests.post(GEMINI_TEXT_URL, headers=headers, json=data)
+        response = requests.post(GROQ_URL, headers=headers, json=data)
         result = response.json()
-        text_response = result["candidates"][0]["content"]["parts"][0]["text"]
-        text_response = text_response.replace("```json", "").replace("```", "").strip()
-        hasil = json.loads(text_response)
+        content = result["choices"][0]["message"]["content"]
+        hasil = json.loads(content)
         return hasil.get("jumlah", 0), hasil.get("adegan", [])
-    except:
+    except Exception as e:
+        print(f"[GROQ] Error: {e}")
         return 0, []
 
 def generate_frame(reference_image_bytes, adegan_prompt, index):
     print(f"[GEMINI] Generate adegan {index}...")
     
-    # Convert gambar ke base64
     image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
     
     full_prompt = f"""
@@ -86,8 +91,6 @@ Gaya: Sinematik, fotorealistik, pencahayaan alami.
     try:
         response = requests.post(GEMINI_IMAGE_URL, headers=headers, json=data)
         result = response.json()
-        
-        # Extract base64 image dari response
         image_data = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
         return base64.b64decode(image_data)
     except Exception as e:
@@ -127,7 +130,7 @@ def process_telegram_update(update):
     jumlah, adegan_list = parse_user_prompt(caption)
     
     if jumlah == 0 or not adegan_list:
-        send_message_to_telegram(chat_id, "Gagal memahami prompt.")
+        send_message_to_telegram(chat_id, "Gagal memahami prompt. Coba tulis ulang.")
         return
     
     send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
@@ -147,7 +150,7 @@ def process_telegram_update(update):
     send_message_to_telegram(chat_id, f"Selesai. {jumlah} adegan dibuat.")
 
 def main():
-    print("[BOT] Bot Gemini berjalan...")
+    print("[BOT] Bot Gemini + Groq berjalan...")
     last_update_id = 0
     while True:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
