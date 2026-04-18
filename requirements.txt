@@ -1,4 +1,1 @@
 requests
-google-generativeai
-pillow
-replicate
