@@ -39,18 +39,16 @@ Input: {user_text}
         hasil = json.loads(content)
         return hasil.get("jumlah", 0), hasil.get("adegan", [])
     except Exception as e:
-        print(f"[GROQ] Error parse prompt: {e}")
+        print(f"[GROQ] Error: {e}", flush=True)
         return 0, []
 
 def generate_frame(reference_image_bytes, adegan_prompt, index):
-    print(f"[GEMINI] Generate adegan {index}...")
+    print(f"[GEMINI] Generate adegan {index}...", flush=True)
     image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
     
     full_prompt = f"""
-[REFERENCE IMAGE PROVIDED]
 WAJAH, WARNA KULIT, BENTUK TUBUH, DAN PAKAIAN HARUS TETAP SAMA PERSIS.
 HANYA LATAR BELAKANG, POSE, DAN EKSPRESI YANG BOLEH BERUBAH.
-
 Adegan: {adegan_prompt}
 Gaya: Sinematik, fotorealistik, pencahayaan alami.
 """
@@ -68,17 +66,22 @@ Gaya: Sinematik, fotorealistik, pencahayaan alami.
     try:
         response = requests.post(GEMINI_IMAGE_URL, headers=headers, json=data)
         result = response.json()
-        print(f"[GEMINI] Response adegan {index}: {json.dumps(result, indent=2)[:500]}")
+        print(f"[GEMINI] Status: {response.status_code}", flush=True)
+        print(f"[GEMINI] Response: {json.dumps(result)[:800]}", flush=True)
         
         for part in result["candidates"][0]["content"]["parts"]:
             if "inlineData" in part:
+                print(f"[GEMINI] Gambar berhasil didapat adegan {index}", flush=True)
                 return base64.b64decode(part["inlineData"]["data"])
         
-        print(f"[GEMINI] Tidak ada image di response adegan {index}")
+        print(f"[GEMINI] Tidak ada image di response", flush=True)
         return None
     except Exception as e:
-        print(f"[GEMINI] Error adegan {index}: {e}")
-        print(f"[GEMINI] Raw response: {response.text[:300] if 'response' in locals() else 'no response'}")
+        print(f"[GEMINI] Error: {e}", flush=True)
+        try:
+            print(f"[GEMINI] Raw: {response.text[:500]}", flush=True)
+        except:
+            pass
         return None
 
 def send_image_to_telegram(chat_id, image_bytes, caption=""):
@@ -105,6 +108,7 @@ def process_telegram_update(update):
     file_id = photo["file_id"]
     caption = message["caption"]
     
+    print(f"[BOT] Pesan dari {chat_id}: {caption}", flush=True)
     send_message_to_telegram(chat_id, "Memahami permintaan...")
     jumlah, adegan_list = parse_user_prompt(caption)
     
@@ -128,7 +132,7 @@ def process_telegram_update(update):
     send_message_to_telegram(chat_id, f"Selesai. {jumlah} adegan dibuat.")
 
 def main():
-    print("[BOT] Bot Gemini + Groq berjalan...")
+    print("[BOT] Berjalan...", flush=True)
     last_update_id = 0
     while True:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -142,7 +146,7 @@ def main():
                     process_telegram_update(update)
             time.sleep(1)
         except Exception as e:
-            print(f"[BOT] Error: {e}")
+            print(f"[BOT] Error: {e}", flush=True)
             time.sleep(5)
 
 if __name__ == "__main__":
