@@ -8,6 +8,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
+GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 def download_telegram_image(file_id):
@@ -22,68 +23,58 @@ def download_telegram_image(file_id):
 def parse_user_prompt(user_text):
     prompt_groq = f"""
 Kamu adalah asisten kreatif. Ubah perintah user menjadi daftar adegan detail (2-4 adegan).
-
 Format output HARUS JSON:
 {{"jumlah": 3, "adegan": ["deskripsi 1", "deskripsi 2", "deskripsi 3"]}}
-
 Input: {user_text}
 """
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     data = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt_groq}], "temperature": 0.7, "response_format": {"type": "json_object"}}
-    
     try:
         response = requests.post(GROQ_URL, headers=headers, json=data)
-        result = response.json()
-        content = result["choices"][0]["message"]["content"]
-        hasil = json.loads(content)
+        hasil = json.loads(response.json()["choices"][0]["message"]["content"])
         return hasil.get("jumlah", 0), hasil.get("adegan", [])
     except Exception as e:
         print(f"[GROQ] Error: {e}", flush=True)
         return 0, []
 
 def generate_frame(reference_image_bytes, adegan_prompt, index):
-    print(f"[IMAGEN] Generate adegan {index}...", flush=True)
+    print(f"[GEMINI] Generate adegan {index}...", flush=True)
     image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
 
-    full_prompt = f"""Fotorealistik, sinematik, pencahayaan alami.
-Pertahankan wajah, warna kulit, bentuk tubuh, dan pakaian dari referensi.
-Adegan: {adegan_prompt}"""
+    full_prompt = f"""Kamu adalah generator gambar. Buat gambar baru berdasarkan foto referensi berikut.
+WAJAH, WARNA KULIT, BENTUK TUBUH, DAN PAKAIAN HARUS TETAP SAMA PERSIS seperti di foto referensi.
+HANYA LATAR BELAKANG, POSE, DAN EKSPRESI yang boleh berubah sesuai adegan.
+Adegan: {adegan_prompt}
+Gaya: Sinematik, fotorealistik, pencahayaan alami."""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={GEMINI_API_KEY}"
     headers = {"Content-Type": "application/json"}
     data = {
-        "instances": [
-            {
-                "prompt": full_prompt,
-                "referenceImages": [
-                    {
-                        "referenceType": "REFERENCE_TYPE_SUBJECT",
-                        "referenceId": 1,
-                        "referenceImage": {
-                            "bytesBase64Encoded": image_base64
-                        }
-                    }
-                ]
-            }
-        ],
-        "parameters": {
-            "sampleCount": 1,
-            "aspectRatio": "9:16"
+        "contents": [{"parts": [
+            {"text": full_prompt},
+            {"inlineData": {"mimeType": "image/jpeg", "data": image_base64}}
+        ]}],
+        "generationConfig": {
+            "responseModalities": ["IMAGE", "TEXT"]
         }
     }
 
     try:
-        response = requests.post(url, headers=headers, json=data)
+        response = requests.post(GEMINI_IMAGE_URL, headers=headers, json=data)
         result = response.json()
-        print(f"[IMAGEN] Status: {response.status_code}", flush=True)
-        print(f"[IMAGEN] Response: {json.dumps(result)[:500]}", flush=True)
+        print(f"[GEMINI] Status: {response.status_code}", flush=True)
+        print(f"[GEMINI] Response: {json.dumps(result)[:600]}", flush=True)
 
-        image_data = result["predictions"][0]["bytesBase64Encoded"]
-        return base64.b64decode(image_data)
+        for part in result["candidates"][0]["content"]["parts"]:
+            if "inlineData" in part:
+                print(f"[GEMINI] Gambar adegan {index} berhasil!", flush=True)
+                return base64.b64decode(part["inlineData"]["data"])
+
+        print(f"[GEMINI] Tidak ada image di response", flush=True)
+        return None
     except Exception as e:
-        print(f"[IMAGEN] Error adegan {index}: {e}", flush=True)
+        print(f"[GEMINI] Error adegan {index}: {e}", flush=True)
         try:
-            print(f"[IMAGEN] Raw: {response.text[:500]}", flush=True)
+            print(f"[GEMINI] Raw: {response.text[:500]}", flush=True)
         except:
             pass
         return None
