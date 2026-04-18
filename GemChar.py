@@ -1,17 +1,18 @@
 import requests
 import time
 import os
-from io import BytesIO
-import google.generativeai as genai
 import json
+import base64
+from io import BytesIO
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-genai.configure(api_key=GEMINI_API_KEY)
+# Endpoint Gemini untuk generate gambar
+GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
 
-text_model = genai.GenerativeModel("gemini-2.0-flash")
-image_model = genai.ImageGenerationModel("models/gemini-3-pro-image-preview")
+# Endpoint Gemini Text buat parse prompt
+GEMINI_TEXT_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 
 def download_telegram_image(file_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
@@ -28,57 +29,74 @@ Kamu adalah asisten sutradara AI. User akan memberikan perintah bebas tentang ad
 
 Tugasmu:
 1. Tentukan berapa jumlah adegan yang diminta user (angka).
-2. Buat deskripsi detail untuk SETIAP adegan. Setiap adegan HARUS mencakup:
-   - Aktivitas yang dilakukan karakter.
-   - Ekspresi wajah.
-   - Latar belakang.
-   - Angle kamera (opsional).
+2. Buat deskripsi detail untuk SETIAP adegan.
 
-Format output HARUS JSON seperti ini:
+Format output HARUS JSON:
 {{
   "jumlah": 4,
-  "adegan": [
-    "Mencuci beras di sungai jernih, ekspresi fokus, kamera close-up tangan dan anyaman bambu, latar hutan tropis.",
-    "Menyalakan api tungku kayu, ekspresi hati-hati, kamera medium shot, latar dapur tradisional bambu.",
-    "Memasukkan beras ke dandang dan menutupnya, ekspresi telaten, kamera side angle.",
-    "Mengaduk nasi matang dengan centong kayu, uap mengepul, ekspresi puas, kamera slow motion."
-  ]
+  "adegan": ["deskripsi adegan 1", "deskripsi adegan 2", ...]
 }}
 
 Input user: {user_text}
 """
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "contents": [{"parts": [{"text": prompt_parser}]}]
+    }
+    
     try:
-        response = text_model.generate_content(prompt_parser)
-        hasil = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+        response = requests.post(GEMINI_TEXT_URL, headers=headers, json=data)
+        result = response.json()
+        text_response = result["candidates"][0]["content"]["parts"][0]["text"]
+        text_response = text_response.replace("```json", "").replace("```", "").strip()
+        hasil = json.loads(text_response)
         return hasil.get("jumlah", 0), hasil.get("adegan", [])
     except:
         return 0, []
 
-def generate_frame(reference_image_data, adegan_prompt, index):
+def generate_frame(reference_image_bytes, adegan_prompt, index):
     print(f"[GEMINI] Generate adegan {index}...")
+    
+    # Convert gambar ke base64
+    image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
+    
     full_prompt = f"""
 [REFERENCE IMAGE PROVIDED]
 Foto yang diunggah adalah REFERENSI MUTLAK untuk karakter.
-WAJAH, WARNA KULIT, BENTUK TUBUH, DAN PAKAIAN HARUS TETAP SAMA PERSIS di setiap adegan.
+WAJAH, WARNA KULIT, BENTUK TUBUH, DAN PAKAIAN HARUS TETAP SAMA PERSIS.
 JANGAN UBAH IDENTITAS KARAKTER. HANYA LATAR BELAKANG, POSE, DAN EKSPRESI YANG BOLEH BERUBAH.
 
 Adegan: {adegan_prompt}
-Gaya: Sinematik, fotorealistik, pencahayaan alami, 8K.
+Gaya: Sinematik, fotorealistik, pencahayaan alami.
 """
+    
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "contents": [{
+            "parts": [
+                {"text": full_prompt},
+                {"inlineData": {"mimeType": "image/jpeg", "data": image_base64}}
+            ]
+        }],
+        "generationConfig": {
+            "responseModalities": ["IMAGE"]
+        }
+    }
+    
     try:
-        response = image_model.generate_images(
-            prompt=full_prompt,
-            reference_images=[reference_image_data],
-            number_of_images=1
-        )
-        return response.images[0]
+        response = requests.post(GEMINI_IMAGE_URL, headers=headers, json=data)
+        result = response.json()
+        
+        # Extract base64 image dari response
+        image_data = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        return base64.b64decode(image_data)
     except Exception as e:
-        print(f"[GEMINI] Error adegan {index}: {e}")
+        print(f"[GEMINI] Error: {e}")
         return None
 
-def send_image_to_telegram(chat_id, image_data, caption=""):
+def send_image_to_telegram(chat_id, image_bytes, caption=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("frame.jpg", image_data, "image/jpeg")}
+    files = {"photo": ("frame.jpg", image_bytes, "image/jpeg")}
     data = {"chat_id": chat_id, "caption": caption}
     requests.post(url, files=files, data=data)
 
@@ -94,11 +112,11 @@ def process_telegram_update(update):
     chat_id = message["chat"]["id"]
     
     if "photo" not in message:
-        send_message_to_telegram(chat_id, "Silakan kirim FOTO karakter + prompt bebas (contoh: 'Buat 4 adegan memasak nasi tradisional').")
+        send_message_to_telegram(chat_id, "Silakan kirim FOTO karakter + prompt bebas.")
         return
     
     if "caption" not in message:
-        send_message_to_telegram(chat_id, "Tulis prompt di caption foto. Contoh: 'Buat 5 adegan mancing di sungai'.")
+        send_message_to_telegram(chat_id, "Tulis prompt di caption foto.")
         return
     
     photo = message["photo"][-1]
@@ -109,10 +127,10 @@ def process_telegram_update(update):
     jumlah, adegan_list = parse_user_prompt(caption)
     
     if jumlah == 0 or not adegan_list:
-        send_message_to_telegram(chat_id, "Gagal memahami prompt. Coba tulis ulang dengan lebih jelas.")
+        send_message_to_telegram(chat_id, "Gagal memahami prompt.")
         return
     
-    send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan... Mohon tunggu 1-2 menit per adegan.")
+    send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
     
     reference_image = download_telegram_image(file_id)
     if not reference_image:
@@ -120,19 +138,16 @@ def process_telegram_update(update):
         return
     
     for i, adegan in enumerate(adegan_list, 1):
-        frame_image = generate_frame(reference_image, adegan, i)
-        if frame_image:
-            img_bytes = BytesIO()
-            frame_image.save(img_bytes, format="JPEG")
-            img_bytes.seek(0)
-            send_image_to_telegram(chat_id, img_bytes.getvalue(), f"Adegan {i}/{jumlah}: {adegan}")
+        frame_bytes = generate_frame(reference_image, adegan, i)
+        if frame_bytes:
+            send_image_to_telegram(chat_id, frame_bytes, f"Adegan {i}/{jumlah}")
         else:
             send_message_to_telegram(chat_id, f"Gagal generate adegan {i}.")
     
-    send_message_to_telegram(chat_id, f"Selesai. {jumlah} adegan berhasil dibuat.")
+    send_message_to_telegram(chat_id, f"Selesai. {jumlah} adegan dibuat.")
 
 def main():
-    print("[BOT] Bot Gemini Fleksibel berjalan...")
+    print("[BOT] Bot Gemini berjalan...")
     last_update_id = 0
     while True:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"

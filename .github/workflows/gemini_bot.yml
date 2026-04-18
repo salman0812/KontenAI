@@ -18,9 +18,7 @@ jobs:
           python-version: '3.11'
       
       - name: Install dependencies
-        run: |
-          pip install requests pillow
-          pip install google-genai
+        run: pip install requests
       
       - name: Jalankan Bot Gemini
         env:
