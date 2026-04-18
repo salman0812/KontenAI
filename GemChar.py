@@ -4,14 +4,12 @@ import os
 import json
 import base64
 from io import BytesIO
-import traceback
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+POLLINATIONS_URL = "https://image.pollinations.ai/prompt"
 
 def download_telegram_image(file_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
@@ -24,26 +22,17 @@ def download_telegram_image(file_id):
 
 def parse_user_prompt(user_text):
     prompt_groq = f"""
-Kamu adalah asisten kreatif. User memberikan perintah bebas tentang adegan yang diinginkan.
+Kamu adalah asisten kreatif. Ubah perintah user menjadi daftar adegan detail (2-4 adegan).
 
-Tugasmu: Ubah perintah user menjadi daftar adegan detail. Tentukan sendiri jumlah adegan yang pas (antara 2-6 adegan).
-
-Format output HARUS JSON valid:
+Format output HARUS JSON:
 {{
   "jumlah": 3,
-  "adegan": [
-    "deskripsi detail adegan 1",
-    "deskripsi detail adegan 2",
-    "deskripsi detail adegan 3"
-  ]
+  "adegan": ["deskripsi detail 1", "deskripsi detail 2", "deskripsi detail 3"]
 }}
 
-Input user: {user_text}
+Input: {user_text}
 """
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt_groq}],
@@ -57,57 +46,23 @@ Input user: {user_text}
         content = result["choices"][0]["message"]["content"]
         hasil = json.loads(content)
         return hasil.get("jumlah", 0), hasil.get("adegan", [])
-    except Exception as e:
-        print(f"[GROQ] Error: {e}")
-        traceback.print_exc()
+    except:
         return 0, []
 
 def generate_frame(reference_image_bytes, adegan_prompt, index):
-    print(f"[GEMINI] Generate adegan {index}...")
+    print(f"[POLLINATIONS] Generate adegan {index}...")
     
-    image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
-    
-    full_prompt = f"""
-Generate an image based on this reference photo. Keep the character's face, skin tone, body shape, and clothing EXACTLY the same as the reference. Only change the background, pose, and expression.
-
-Scene: {adegan_prompt}
-Style: Cinematic, photorealistic, natural lighting.
-"""
-    
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "contents": [{
-            "parts": [
-                {"text": full_prompt},
-                {"inlineData": {"mimeType": "image/jpeg", "data": image_base64}}
-            ]
-        }],
-        "generationConfig": {
-            "responseModalities": ["IMAGE"]
-        }
-    }
+    # Pollinations gak support reference image langsung, jadi kita kirim prompt aja
+    full_prompt = f"{adegan_prompt}, cinematic, photorealistic, 8K, natural lighting"
+    encoded_prompt = requests.utils.quote(full_prompt)
     
     try:
-        response = requests.post(GEMINI_IMAGE_URL, headers=headers, json=data)
-        print(f"[GEMINI] Response status: {response.status_code}")
-        
-        if response.status_code != 200:
-            print(f"[GEMINI] Error response: {response.text}")
+        response = requests.get(f"{POLLINATIONS_URL}/{encoded_prompt}")
+        if response.status_code == 200:
+            return response.content
+        else:
             return None
-        
-        result = response.json()
-        print(f"[GEMINI] Result keys: {result.keys()}")
-        
-        if "candidates" not in result:
-            print(f"[GEMINI] No candidates in response: {result}")
-            return None
-            
-        image_data = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-        return base64.b64decode(image_data)
-        
-    except Exception as e:
-        print(f"[GEMINI] Exception: {e}")
-        traceback.print_exc()
+    except:
         return None
 
 def send_image_to_telegram(chat_id, image_bytes, caption=""):
@@ -127,34 +82,23 @@ def process_telegram_update(update):
     message = update["message"]
     chat_id = message["chat"]["id"]
     
-    if "photo" not in message:
-        send_message_to_telegram(chat_id, "Silakan kirim FOTO karakter + prompt bebas.")
-        return
-    
     if "caption" not in message:
-        send_message_to_telegram(chat_id, "Tulis prompt di caption foto.")
+        send_message_to_telegram(chat_id, "Kirim foto + caption prompt.")
         return
     
-    photo = message["photo"][-1]
-    file_id = photo["file_id"]
     caption = message["caption"]
     
     send_message_to_telegram(chat_id, "Memahami permintaan...")
     jumlah, adegan_list = parse_user_prompt(caption)
     
     if jumlah == 0 or not adegan_list:
-        send_message_to_telegram(chat_id, "Gagal memahami prompt. Coba tulis ulang.")
+        send_message_to_telegram(chat_id, "Gagal memahami prompt.")
         return
     
     send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
     
-    reference_image = download_telegram_image(file_id)
-    if not reference_image:
-        send_message_to_telegram(chat_id, "Gagal download gambar.")
-        return
-    
     for i, adegan in enumerate(adegan_list, 1):
-        frame_bytes = generate_frame(reference_image, adegan, i)
+        frame_bytes = generate_frame(None, adegan, i)
         if frame_bytes:
             send_image_to_telegram(chat_id, frame_bytes, f"Adegan {i}/{jumlah}")
         else:
@@ -163,7 +107,7 @@ def process_telegram_update(update):
     send_message_to_telegram(chat_id, f"Selesai. {jumlah} adegan dibuat.")
 
 def main():
-    print("[BOT] Bot Gemini + Groq berjalan...")
+    print("[BOT] Bot Pollinations + Groq berjalan...")
     last_update_id = 0
     while True:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -178,7 +122,6 @@ def main():
             time.sleep(1)
         except Exception as e:
             print(f"[BOT] Error: {e}")
-            traceback.print_exc()
             time.sleep(5)
 
 if __name__ == "__main__":
