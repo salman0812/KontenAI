@@ -4,14 +4,13 @@ import os
 import json
 import base64
 from io import BytesIO
+import traceback
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# Endpoint Gemini Imagen (khusus generate gambar)
-GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1/models/imagen-3.0-generate-001:predict?key={GEMINI_API_KEY}"
-
+GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 def download_telegram_image(file_id):
@@ -60,6 +59,7 @@ Input user: {user_text}
         return hasil.get("jumlah", 0), hasil.get("adegan", [])
     except Exception as e:
         print(f"[GROQ] Error: {e}")
+        traceback.print_exc()
         return 0, []
 
 def generate_frame(reference_image_bytes, adegan_prompt, index):
@@ -68,37 +68,46 @@ def generate_frame(reference_image_bytes, adegan_prompt, index):
     image_base64 = base64.b64encode(reference_image_bytes).decode('utf-8')
     
     full_prompt = f"""
-Foto yang diunggah adalah REFERENSI MUTLAK untuk karakter.
-WAJAH, WARNA KULIT, BENTUK TUBUH, DAN PAKAIAN HARUS TETAP SAMA PERSIS.
-JANGAN UBAH IDENTITAS KARAKTER. HANYA LATAR BELAKANG, POSE, DAN EKSPRESI YANG BOLEH BERUBAH.
+Generate an image based on this reference photo. Keep the character's face, skin tone, body shape, and clothing EXACTLY the same as the reference. Only change the background, pose, and expression.
 
-Adegan: {adegan_prompt}
-Gaya: Sinematik, fotorealistik, pencahayaan alami.
+Scene: {adegan_prompt}
+Style: Cinematic, photorealistic, natural lighting.
 """
     
     headers = {"Content-Type": "application/json"}
     data = {
-        "instances": [{
-            "prompt": full_prompt,
-            "referenceImage": {
-                "bytesBase64Encoded": image_base64
-            }
+        "contents": [{
+            "parts": [
+                {"text": full_prompt},
+                {"inlineData": {"mimeType": "image/jpeg", "data": image_base64}}
+            ]
         }],
-        "parameters": {
-            "sampleCount": 1
+        "generationConfig": {
+            "responseModalities": ["IMAGE"]
         }
     }
     
     try:
         response = requests.post(GEMINI_IMAGE_URL, headers=headers, json=data)
-        result = response.json()
+        print(f"[GEMINI] Response status: {response.status_code}")
         
-        # Extract base64 image dari response
-        image_base64_response = result["predictions"][0]["bytesBase64Encoded"]
-        return base64.b64decode(image_base64_response)
+        if response.status_code != 200:
+            print(f"[GEMINI] Error response: {response.text}")
+            return None
+        
+        result = response.json()
+        print(f"[GEMINI] Result keys: {result.keys()}")
+        
+        if "candidates" not in result:
+            print(f"[GEMINI] No candidates in response: {result}")
+            return None
+            
+        image_data = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        return base64.b64decode(image_data)
+        
     except Exception as e:
-        print(f"[GEMINI] Error: {e}")
-        print(f"[GEMINI] Response: {response.text[:500]}")
+        print(f"[GEMINI] Exception: {e}")
+        traceback.print_exc()
         return None
 
 def send_image_to_telegram(chat_id, image_bytes, caption=""):
@@ -134,7 +143,7 @@ def process_telegram_update(update):
     jumlah, adegan_list = parse_user_prompt(caption)
     
     if jumlah == 0 or not adegan_list:
-        send_message_to_telegram(chat_id, "Gagal memahami prompt.")
+        send_message_to_telegram(chat_id, "Gagal memahami prompt. Coba tulis ulang.")
         return
     
     send_message_to_telegram(chat_id, f"Memproses {jumlah} adegan...")
@@ -169,6 +178,7 @@ def main():
             time.sleep(1)
         except Exception as e:
             print(f"[BOT] Error: {e}")
+            traceback.print_exc()
             time.sleep(5)
 
 if __name__ == "__main__":
